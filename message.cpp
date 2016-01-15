@@ -1,5 +1,5 @@
 //
-// Created by xyy on 15-12-18.
+// Created by sjtu on 15-12-23.
 //
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,54 +12,48 @@
 
 #include "message.h"
 
-uint32_t g_session_id = 0;
-uint8_t g_display_type = 0;
-uint8_t g_display_id = 0;
+int SESSIONID;
 
-void init_link_msg(red_link_msg *link_msg, int session_ID, int channel_type,
-                   int channel_ID,int client_comm_caps,int channel_spe_caps){
-    link_msg->spice_magic[0] = 'R';
-    link_msg->spice_magic[1] = 'E';
-    link_msg->spice_magic[2] = 'D';
-    link_msg->spice_magic[3] = 'Q';
+uint64_t multimedia_time_unit[40];
+uint64_t current_time_unit[40];
+uint64_t body_size_unit[40];
 
-    link_msg->major_version = 2;
-    link_msg->minor_version = 2;
-    link_msg->message_size = 26;
-    link_msg->session_ID = session_ID;
-    link_msg->channel_type = channel_type;
-    link_msg->channel_ID = channel_ID;
-    link_msg->num_com_caps = 1;
-    link_msg->num_channel_caps = 1;
-    link_msg->caps_offset = 18;
-    link_msg->client_comm_caps = client_comm_caps;
-    link_msg->channel_spe_caps = channel_spe_caps;
+//uint64_t multimedia_time_before;
+//uint64_t current_time_before;
+//uint64_t body_size_before;
+int i = 0;
+
+void init_clientlink_message(struct ClientLinkMessage *clientLinkMessage)
+{
+    clientLinkMessage->SPICE_MAGIC[0]= 'R';
+    clientLinkMessage->SPICE_MAGIC[1]= 'E';
+    clientLinkMessage->SPICE_MAGIC[2]= 'D';
+    clientLinkMessage->SPICE_MAGIC[3]= 'Q';
+
+    clientLinkMessage->Protocol_major_version=2;
+    clientLinkMessage->Protocol_minor_version=2;
+    clientLinkMessage->Message_size=26;
+    clientLinkMessage->Session_ID= 0;
+    clientLinkMessage->channel_type=1;
+    clientLinkMessage->channel_ID=0;
+    clientLinkMessage->Number_of_channel_capabilities=1;
+    clientLinkMessage->Number_of_common_capabilities=1;
+    clientLinkMessage->Capabilities_offset=18;
+    clientLinkMessage->client_Common_Capabilities=13;
+    clientLinkMessage->client_channel_specific_capabilities=15;
 }
 
-int send_pong_msg(int cfd, uint32_t ping_ID, uint64_t ping_timestamp){
-    char *send_buf = (char *)malloc(sizeof(char)*200);
-    spice_msg_miniheader msg_miniheader;
-    msg_miniheader.type = 3;
-    msg_miniheader.size = 12;
-
-    memcpy(send_buf,&msg_miniheader,sizeof(spice_msg_miniheader));
-
-    spice_msg_pong msg_pong;
-    msg_pong.id = ping_ID;
-    msg_pong.timestamp = ping_timestamp;
-
-    *((uint32_t *)&send_buf[6]) = ping_ID;
-    *((uint32_t *)&send_buf[10]) = ping_timestamp;
-
-    int sendn = send(cfd,send_buf,18,0);
-    if(sendn != 18){
-        printf("send pong message error\n");
-        exit(0);
-    }
-
-    return 0;
-
+void sendpong(uint32_t cfd, uint32_t pingid, uint64_t timestamp)
+{
+    ClientPong clientPong;
+    clientPong.Message_type = 3;
+    clientPong.Message_body_size = 12;
+    clientPong.Ping_ID = pingid;
+    clientPong.time = timestamp;
+    send(cfd,&clientPong,18,0);
+    printf("pong message sent\n");
 }
+
 
 int init_socket(char *ip_addr, int port){
     int cfd;
@@ -80,38 +74,59 @@ int init_socket(char *ip_addr, int port){
     return cfd;
 }
 
-unsigned char *encrypt_password(unsigned char * pub_key_info, unsigned char *password){
-    const unsigned char *pub_key = pub_key_info;
-    int RSASize;
-    RSA *rsa;
 
-    unsigned char *encrypt_buf = (unsigned char*) malloc(128*sizeof(char));
-
-    rsa = d2i_RSA_PUBKEY(NULL, &pub_key, 162);
-    RSASize = RSA_size(rsa);
-
-    RSA_public_encrypt(1,password,encrypt_buf,rsa,RSA_PKCS1_OAEP_PADDING);
-
-    return encrypt_buf;
-}
-
-int make_stream_file(int stream_sequence_num, char *media_buf, int stream_size){
-    FILE *fp = NULL;
-    char *file_name = (char *)malloc(sizeof(char)*100);
-//    sprintf(file_name,"%s%d","/home/sjtu/code/ClionProjects/client2/stream_data/",stream_sequence_num);
-    sprintf(file_name,"%s%s","/home/xyy/spice_client/stream_data/","frame_data");
-    printf("file name %s\n",file_name);
-
-    if((fp = fopen(file_name,"ab+")) == NULL){
-        printf("create file error");
-        exit(0);
+int cal_time(uint64_t multimedia_time,uint64_t current_time,uint32_t body_size)
+{
+//    if(i == 0)
+//    {
+//        multimedia_time_before = multimedia_time;
+//        current_time_before = current_time;
+//        body_size_before = body_size;
+//        i++;
+//        return 0;
+//    }
+//    else
+//    {
+//        printf("i = %d",i);
+//        uint64_t band_est;
+//        printf("size difference: %ld Bytes    ",body_size-body_size_before);
+//        printf("time difference: %ldms    ",current_time-current_time_before-multimedia_time+multimedia_time_before);
+////        band_est = (body_size-body_size_before)*8*1000/(current_time-current_time_before-multimedia_time+multimedia_time_before);
+////        printf("current bandwidth estimation: %ld kb/s   ",band_est);
+//        current_time_before = current_time;
+//        multimedia_time_before = multimedia_time;
+//        body_size_before = body_size;
+//        i++;
+//    }
+    if(i<40)
+    {
+        current_time_unit[i] = current_time;
+        multimedia_time_unit[i] = multimedia_time;
+        body_size_unit[i] = body_size;
+        i++;
     }
+    else
+    {
+        int64_t size_difference = 0;
+        int64_t time_difference = 0;
+        for(int j=0;j<20;j++)
+        {
+            size_difference += body_size_unit[j];
+            time_difference += current_time_unit[j]- multimedia_time_unit[j];
+        }
+        for(int j=20;j<40;j++)
+        {
+            size_difference -= body_size_unit[j];
+            time_difference -= current_time_unit[j]- multimedia_time_unit[j];
+        }
+        printf("size_difference = %ldBytes   time_difference = %ldms\n",size_difference,time_difference);
+//        printf("estimated bandwidth:ld%kbps",size_difference/time_difference);
+        i = 0;
+        current_time_unit[i] = current_time;
+        multimedia_time_unit[i] = multimedia_time;
+        body_size_unit[i] = body_size;
 
-    if((fwrite(&media_buf[12],1,stream_size,fp) != stream_size)){
-        printf("write file error\n");
-        exit(0);
+
     }
-    fclose(fp);
-    free(file_name);
     return 0;
 }

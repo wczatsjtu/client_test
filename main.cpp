@@ -1,214 +1,108 @@
 #include <iostream>
-
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
-
-
-#include <openssl/ssl.h>
-
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <openssl/x509.h>
 #include "message.h"
+#include <pthread.h>
+#include <sys/time.h>
 
-//#define DEBUG_DEF
-#define IP_OTHER
 
 using namespace std;
 
 void *display_channel_handler(void *arg);
 
-int main() {
-    char send_buf[500];
-    unsigned char buf[1500];
-    memset(buf,500,1);
 
-    int cfd;
 
-    char *ip_addr = (char *)"127.0.0.1";
+int main( int argc, char** argv )
+{
+    struct sockaddr_in server_addr_in;
+    unsigned char rec_buf[1500];
+    char *send_buf = (char *)malloc(42*sizeof(char));
+    uint32_t cfd;
+    uint32_t port = 5910;
+//    初始化client_link_message
+    ClientLinkMessage clientLinkMessage;
+    init_clientlink_message(&clientLinkMessage);
+    memcpy(send_buf,&clientLinkMessage,sizeof(clientLinkMessage));
 
-#ifdef IP_OTHER
-    ip_addr = (char *)"192.168.1.120";
-#endif
-    int port = 5910;
 
-    cfd = init_socket(ip_addr,port);
+//初始化socket连接
+    cfd = socket( AF_INET, SOCK_STREAM, 0 );
 
-//main client link message
-    red_link_msg link_msg;
-    red_link_reply link_reply;
+    bzero( &server_addr_in, sizeof(server_addr_in) );
 
-    init_link_msg(&link_msg, 0, 1, 0, 0x0d, 0x0f);
-    memcpy(send_buf,&link_msg,sizeof(red_link_msg));
+    server_addr_in.sin_family = AF_INET;
+    server_addr_in.sin_port = htons(port);
+    inet_pton( AF_INET, "172.16.5.84", &server_addr_in.sin_addr );
 
-    int sendn = send(cfd,send_buf,sizeof(red_link_msg),0);
-    printf("send %d byte\n",sendn);
+    if(connect( cfd, (struct sockaddr *)&server_addr_in, sizeof(server_addr_in) )<0)
+        printf("socket connecting failure");
 
-//main server link message
+//发送client_link消息
+    if(send( cfd,send_buf,42,0 )>0)
+        printf("1.client_link message sent\n");
+
     sleep(1);
-    int recn = recv(cfd,buf,sizeof(red_link_reply),0);
-    if( recn < 0){
-        printf("receive error!\n");
-    }
-    printf("receive %d byte\n",recn);
-
-#ifdef DEBUG_DEF
-//    printf("Receive from server : %s\n",buf);
-/*
-    printf("%c\n",buf[0]);
-    printf("%c\n",buf[1]);
-    printf("%c\n",buf[2]);
-    printf("%c\n",buf[3]);
-
-    int maj = *((int *)(&buf[4]));
-    printf("maj = %d\n",maj);
-
-    int min = *((int *)(&buf[8]));
-    printf("min = %d\n",min);
+//接受server_link消息
+    ServerLinkMessage serverLinkMessage;
+    int count = recv( cfd, rec_buf, 1500, 0 );
+    if(count >0)
+        printf("2.server_link message received,bytes count: %d \n",count);
+    memcpy(&serverLinkMessage,rec_buf,202);
+    printf("    Recive from server : %s \n", rec_buf);
+//发送authentication selection method消息
+//    int client_auth = 1;
+//    if(send(cfd,&client_auth,4,0)>0)
+//        printf("3.client authentification method selection message sent \n");
+    SpiceLinkAuthMechanism client_auth;
+    client_auth.auth_mechanism = 1;
+    if(send(cfd,&client_auth,4,0)>0)
+       printf("3.client authentification method selection message sent \n");
 
 
-    int size = *((int *)(&buf[12]));
-    printf("size = %d\n",size);
 
-    int err = *((int *)(&buf[16]));
-    printf("err = %d\n",err);
-*/
-#endif
 
-//main client authentication
-    int client_auth = 1;
-    send(cfd,&client_auth,4,0);
+//提取公钥，客户端密码加密发送
+    const unsigned char * tmp_key = (const unsigned char *)serverLinkMessage.Publie_key;
 
-//main client ticket
-    memcpy(&link_reply,buf,202);
-
+//    BIO *bio_key = BIO_new(BIO_s_mem());
+//    EVP_PKEY *pub_key;
     int nRSASize;
     RSA *rsa;
-    unsigned char *encrypt_buf;
+    rsa = d2i_RSA_PUBKEY(NULL,&tmp_key,162);
+    nRSASize = RSA_size(rsa);
+//    printf("rsa size : %d\n",nRSASize);
+    unsigned char *password=(unsigned char*)"";
+    unsigned char encrypt_buf[128];
+    RSA_public_encrypt(1,password,encrypt_buf,rsa,RSA_PKCS1_OAEP_PADDING);
+    if(send(cfd,encrypt_buf,128,0)>0)
+        printf("4.client ticket sent\n");
 
-    encrypt_buf = encrypt_password(link_reply.pub_key,(unsigned char*)"");
-    sendn = send(cfd,encrypt_buf,128,0);
-    if(sendn != 128){
-        printf("error in send client ticket!\n");
-        exit(0);
-    }
-    free(encrypt_buf);
+//    EVP_PKEY_free(pub_key);
 
-//main server ticket
-    recv(cfd,buf,4,0);
+//    BIO_free(bio_key);
 
-    int link_result = *((uint32_t *)&buf[0]);
-    if(link_result != 0){
-        printf("link server error!\n");
-        exit(0);
-    }
-    printf("link server success\n");
 
-//main server init , main server VM_UUID, main server ping*2
-    recn = recv(cfd,buf,38,0);
-    recn += recv(cfd,&buf[recn],22,0);
-    recn += recv(cfd,&buf[recn],18,0);
-    recn += recv(cfd,&buf[recn],18,0);
+//接受server ticket消息
+    count=recv(cfd,rec_buf,4,0);
+//    if(count>0)
+//        printf("5.server ticket received,bytes:%d\n", count);
+    if(*(uint32_t *)&rec_buf[0] == 0)
+        printf("5.server ticket received\n");
 
-    printf("receive %d bytes for server init\n",recn);
 
-    uint16_t msg_type;
-    uint32_t msg_size;
-    uint32_t num_of_channels;
-    uint32_t ping_ID;
-    uint64_t ping_timestamp;
+    ClientAttachChannels clientAttachChannels;
+    if(send(cfd,&clientAttachChannels,sizeof(clientAttachChannels),0) == 6)
+        printf("client attach_channels message sent\n");
 
-    msg_type = *((uint16_t *)&buf[0]);
-    msg_size = *((uint32_t *)&buf[2]);
-
-    g_session_id = *((uint32_t *)&buf[6]);
-    num_of_channels = *((uint32_t *)&buf[10]);
-
-    printf("msg type %d\n",msg_type);
-    printf("msg size %d\n",msg_size);
-    printf("msg session id %d\n",g_session_id);
-    int offset = 0;
-    uint8_t *msg_buf = (uint8_t *)malloc(500*sizeof(char));
-
-    //server init length
-    offset += 38;
-    //server VM_UUID length
-    offset += 22;
-    memcpy(msg_buf,&buf[offset],18);
-
-    msg_type = *((uint16_t *) &msg_buf[0]);
-    ping_ID = *((uint32_t *) &msg_buf[6]);
-    ping_timestamp = *((uint64_t *) &msg_buf[10]);
-    if(msg_type == 4){
-        send_pong_msg(cfd,ping_ID,ping_timestamp);
-    }
-
-    offset += 18;
-    memcpy(msg_buf,&buf[offset],18);
-    msg_type = *((uint16_t *) &msg_buf[0]);
-    ping_ID = *((uint32_t *) &msg_buf[6]);
-    ping_timestamp = *((uint64_t *) &msg_buf[10]);
-    if(msg_type == 4){
-        send_pong_msg(cfd,ping_ID,ping_timestamp);
-    }
-
-//client attach channels message
-    client_attach_channels attach_channels;
-    attach_channels.type = 104;
-    attach_channels.size = 0;
-
-    memcpy(send_buf,&attach_channels,sizeof(attach_channels));
-    sendn = send(cfd,send_buf,sizeof(attach_channels),0);
-    if(sendn != sizeof(attach_channels)){
-        printf("send client attach channels error!\n");
-        exit(0);
-    }
-
-//big ping packet
-    recn = recv(cfd,buf,1500,0);
-    printf("first packet size %d\n",recn);
-    msg_type = *((uint16_t *) &buf[0]);
-    msg_size = *((uint32_t *) &buf[2]);
-    ping_ID = *((uint32_t *) &buf[6]);
-    ping_timestamp = *((uint64_t *) &buf[10]);
-    printf("ping packet size %d\n",msg_size);
-
-    int count;
-    int last_packet_size;
-    for(count=0;count<((msg_size/1500)-1);count++){
-        recn = recv(cfd,buf,1500,0);
-    }
-
-    last_packet_size = msg_size + 6 - (count+1)*1500;
-    printf("last packet size = %d\n",last_packet_size);
-    recn = recv(cfd,buf,last_packet_size,0);
-    printf("last ping packet %d\n",recn);
-    printf("ping packets count %d\n",count);
-    if(msg_type == 4){
-        send_pong_msg(cfd,ping_ID,ping_timestamp);
-    }
-
-//server channel list
-    recn = recv(cfd,buf,6,0);
-    msg_type = *((uint16_t *) &buf[0]);
-    msg_size = *((uint32_t *) &buf[2]);
-    if(msg_type == 104){
-        recn = recv(cfd,&buf[6],10,0);
-        if(recn != msg_size){
-            printf("receive server channel list error!\n");
-            exit(0);
-        }
-    }
-
-    g_display_type = *((uint8_t *) &buf[12]);
-    g_display_id = *((uint8_t *) &buf[13]);
-
-    printf("display channel type %d and display channel id %d\n",g_display_type,g_display_id);
-
-//display channel
+    //display channel
     pthread_t display_thread;
     int ret_thread;
-    void *retval;
-    int tmp1;
     ret_thread = pthread_create(&display_thread,NULL,display_channel_handler,NULL);
     if(ret_thread != 0){
         printf("error in create display channel thread !\n");
@@ -216,79 +110,144 @@ int main() {
         printf("success in create display channel thread\n");
     }
 
-    while(1){
-        printf("main channel working\n");
-        recn = recv(cfd,buf,6,0);
-        msg_type = *((uint16_t *)&buf[0]);
-        msg_size = *((uint32_t *)&buf[2]);
 
-        if(msg_size != 0){
-            recn = recv(cfd,&buf[6],msg_size,0);
-            if(recn != msg_size) {
-                printf("error in receive main message!\n");
-                exit(0);
-            }
-        }
+    uint16_t message_type;
+    uint32_t body_size;
+    while(1)
+    {
+        count = recv(cfd,rec_buf,6,0);
+        message_type = *(uint16_t *)&rec_buf[0];
+        body_size = *(uint32_t *)&rec_buf[2];
 
-        switch(msg_type){
-            //server ping
-            case 4:{
-                printf("receive main server ping\n");
-                ping_ID = *((uint32_t *) &buf[6]);
-                ping_timestamp = *((uint64_t *) &buf[10]);
-                send_pong_msg(cfd,ping_ID,ping_timestamp);
+        switch(message_type)
+        {
+            //Server NOTIFY
+            case 7:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+//              printf("Server NOTIFY message received\n");
                 break;
             }
-            case 59:{
-                printf("receive serve NOTIFY");
+            //Server INIT
+            case 103:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+                printf("Server INIT message received, Session ID reserved\n");
+                SESSIONID = *(uint32_t *)&rec_buf[0];
                 break;
             }
-            case 104:{
-                printf("receive server Channel_List\n");
+            //Server Channels_LIST
+            case 104:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+
+
+                printf("Server channels_List message received\n");
                 break;
             }
-            case 105:{
-                printf("receive server Mouse_MODE\n");
-            }
-            case 109:{
-                printf("receive server AGENT_DATA\n");
+            // Server Mouse_MODE
+            case 105:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+//                printf("Server MOUSE MODE message received\n");
                 break;
             }
-            default:{
-                printf("receive main unhandled message type\n");
+
+            // Server AGENT_DISCONNECTED
+            case 108:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+ //             printf("server AGENT_DISCONNECTED message received\n");
+                break;
+
+            }
+            //Server VM_UUID
+            case 114:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+//                printf("Server VM_UUID message received\n");
+                break;
+            }
+            //Server PING
+            case 4:
+            {
+                uint32_t pingid;
+                uint64_t timestamp;
+                if(body_size == 12)
+                {
+                    count = recv(cfd,rec_buf,body_size,0);
+                    printf("tiny ping message received\n");
+                    pingid = *(uint32_t *)&rec_buf[0];
+                    timestamp = *(uint32_t *)&rec_buf[4];
+                    sendpong(cfd,pingid,timestamp);
+                }
+                if(body_size == 256012)
+                {
+                    int i;
+                    recv(cfd,rec_buf,1500,0);
+                    pingid = *(uint32_t *)&rec_buf[0];
+                    timestamp = *(uint32_t *)&rec_buf[4];
+                    int circular = body_size/1500;
+                    int last_packet_size = body_size%1500;
+                    printf("circular = %d   last_packet_size = %d\n",circular,last_packet_size);
+
+                    for(i=0;i<circular-1;i++)
+                    {
+                        recv(cfd,rec_buf,150,0);
+                    }
+                    recv(cfd,rec_buf,last_packet_size,0);
+                    printf("big ping message received\n");
+                    sendpong(cfd,pingid,timestamp);
+//                    sleep(1);
+                }
+                break;
+            }
+            default:
+            {
+                printf("unhandled message received,message type:%d  message size:%d \n", message_type,body_size);
+//                sleep(1);
+                recv(cfd,rec_buf,1500,0);
                 break;
             }
         }
 
     }
 
-/*    tmp1 = pthread_join(display_thread,&retval);
-    if(tmp1 != 0){
-        printf("can't join with display thread\n");
-    }
-    printf("display thread end\n");
-*/
+
     close(cfd);
     return 0;
 }
 
 
-void *display_channel_handler(void *arg){
-    printf("display thread begin\n");
+void *display_channel_handler(void *arg)
+{
+    printf("this is a message from display channel!!!\n");
+//    struct sockaddr_in server_addr_in;
+//    unsigned char rec_buf[1500];
+//    char *send_buf = (char *)malloc(42*sizeof(char));
+//    uint32_t cfd;
+//    uint32_t port = 5910;
+//
+//
+//    bzero( &server_addr_in, sizeof(server_addr_in) );
+//
+//    server_addr_in.sin_family = AF_INET;
+//    server_addr_in.sin_port = htons(port);
+//    inet_pton( AF_INET, "127.0.0.1", &server_addr_in.sin_addr );
+//
+//    if(connect( cfd, (struct sockaddr *)&server_addr_in, sizeof(server_addr_in) )<0)
+//        printf("    display channel thread socket connecting failure\n");
     char send_buf[300];
     char rec_buf[1500];
-    char media_buf[50000];
+    char media_buf[100000];
+    uint16_t message_type;
+    uint32_t body_size;
 
     int cfd;
-    char *ip_addr = (char *)"127.0.0.1";
-
-#ifdef IP_OTHER
-    ip_addr = (char *)"192.168.1.120";
-#endif
+    char *ip_addr = (char *)"172.16.5.84";
     int port = 5910;
 
-    int stream_sequence = 0;
-    uint32_t set_ack_window = 0;
+    uint64_t stream_sequence = 0;
 
     uint16_t msg_type;
     uint32_t msg_size;
@@ -297,185 +256,210 @@ void *display_channel_handler(void *arg){
 
     cfd = init_socket(ip_addr,port);
 
-//display client link message
-    red_link_msg display_link_msg;
-    init_link_msg(&display_link_msg,g_session_id,g_display_type,g_display_id,0x0d,0x1f);
 
-    memcpy(send_buf,&display_link_msg,sizeof(red_link_msg));
+    //初始化client_link_message
+    ClientLinkMessage clientLinkMessage;
+    init_clientlink_message(&clientLinkMessage);
+    clientLinkMessage.Session_ID = SESSIONID;
+    clientLinkMessage.channel_type = 2;
+    clientLinkMessage.channel_ID = 0;
+    clientLinkMessage.client_Common_Capabilities = 0x0d;
+    clientLinkMessage.client_channel_specific_capabilities = 0x1f;
 
-    int sendn = send(cfd,send_buf,sizeof(red_link_msg),0);
+    memcpy(send_buf,&clientLinkMessage,sizeof(clientLinkMessage));
 
-    if(sendn != sizeof(red_link_msg)){
-        printf("error in send display client link message!\n");
-        exit(0);
-    }
-    printf("send %d byte in display client link message\n",sendn);
-
-//display server link message
+    //发送client_link消息
+    if(send( cfd,send_buf,42,0 )>0)
+        printf("    1.display client_link message sent\n");
     sleep(1);
-    int recn = recv(cfd,rec_buf,sizeof(red_link_reply),0);
-    printf("receive %d byte in display server link reply\n",recn);
 
-//send client authentication method selection
-    int client_auth = 1;
-    send(cfd,&client_auth,4,0);
+    //接受server_link消息
+    ServerLinkMessage serverLinkMessage;
+    int count = recv( cfd, rec_buf, 1500, 0 );
+    if(count >0)
+        printf("    2.display server_link message received,bytes count: %d \n",count);
+    memcpy(&serverLinkMessage,rec_buf,202);
+    printf("    Recive from server : %s \n", rec_buf);
+//发送authentication selection method消息
+//    int client_auth = 1;
+//    if(send(cfd,&client_auth,4,0)>0)
+//        printf("3.client authentification method selection message sent \n");
+    SpiceLinkAuthMechanism client_auth;
+    client_auth.auth_mechanism = 1;
+    if(send(cfd,&client_auth,4,0)>0)
+        printf("    3.display client authentification method selection message sent \n");
 
-    red_link_reply display_link_reply;
-    memcpy(&display_link_reply,rec_buf,sizeof(red_link_reply));
 
-    if(display_link_reply.error != 0){
-        printf("get a wrong display link reply error code!\n");
-        exit(0);
-    }
+    //提取公钥，客户端密码加密发送
+    const unsigned char * tmp_key = (const unsigned char *)serverLinkMessage.Publie_key;
 
-//display client ticket
-    unsigned char *encrypt_buf;
+//    BIO *bio_key = BIO_new(BIO_s_mem());
+//    EVP_PKEY *pub_key;
+    int nRSASize;
+    RSA *rsa;
+    rsa = d2i_RSA_PUBKEY(NULL,&tmp_key,162);
+    nRSASize = RSA_size(rsa);
+//    printf("rsa size : %d\n",nRSASize);
+    unsigned char *password=(unsigned char*)"";
+    unsigned char encrypt_buf[128];
+    RSA_public_encrypt(1,password,encrypt_buf,rsa,RSA_PKCS1_OAEP_PADDING);
+    if(send(cfd,encrypt_buf,128,0)>0)
+        printf("    4.display client ticket sent\n");
 
-    encrypt_buf = encrypt_password(display_link_reply.pub_key,(unsigned char*)"");
-    sendn = send(cfd,encrypt_buf,128,0);
-    if(sendn != 128){
-        printf("error in send client ticket!\n");
-        exit(0);
-    }
-    free(encrypt_buf);
+//    EVP_PKEY_free(pub_key);
 
-//display server ticket
-    recn = recv(cfd,rec_buf,4,0);
-    int link_result = *((uint32_t *)&rec_buf[0]);
-    if(recn != 4 || link_result != 0){
-        printf("error in receiving server ticket!\n");
-        exit(0);
-    }
-    printf("display channel link server success\n");
+//    BIO_free(bio_key);
 
-//display client init
-    spice_msg_miniheader init_header;
-    redc_display_init init_msg;
+    //接受server ticket消息
+    count=recv(cfd,rec_buf,4,0);
 
-    init_header.type = 101;
-    init_header.size = 14;
+    if(*(uint32_t *)&rec_buf[0] == 0)
+        printf("    5.display server ticket received\n");
 
-    init_msg.cache_id = 1;
-    init_msg.cache_size = 0x0140;
-    init_msg.glz_dictionary_id = 1;
-    init_msg.dictionary_win_size = 0x005ffc00;
+    //发送client display init
+    ClientDisplayInit clientDisplayInit;
+    send(cfd,&clientDisplayInit,sizeof(clientDisplayInit),0);
 
-    memcpy(send_buf,&init_header,6);
-    memcpy(&send_buf[6],&init_msg,14);
+    uint32_t display_ack_window = 20;
+    while(1)
+    {
+        count = recv(cfd,rec_buf,6,0);
+        message_type = *(uint16_t *)&rec_buf[0];
+        body_size = *(uint32_t *)&rec_buf[2];
+        uint64_t multimedia_time;
+        uint64_t current_time;
+        struct timespec ts;
+        struct timeval ts1;
 
-    sendn = send(cfd, send_buf, 20, 0);
-    if(sendn != 20){
-        printf("error in send display client init!\n");
-        exit(0);
-    }
-
-//display server set_ack...
-    while(1){
-        recn = recv(cfd,rec_buf,6,0);
-        msg_type = *((uint16_t *)&rec_buf[0]);
-        msg_size = *((uint32_t *)&rec_buf[2]);
-
-//stream data is handled in media buf
-        if(msg_size != 0 && msg_type!=123){
-            printf("msg_size :%d\n",msg_size);
-            recn = recv(cfd,&rec_buf[6],msg_size,0);
-            if(recn != msg_size){
-                printf("error in receive display message!\n");
-                exit(0);
+        switch(message_type)
+        {
+            //Server SET_ACK
+            case 3:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+                display_ack_window = *(uint32_t *)&rec_buf[4];
+                printf("    display channel SET_ACK message received,ack window = %d\n",display_ack_window);
+                ClientAckSync clientAckSync;
+                send(cfd,&clientAckSync,sizeof(clientAckSync),0);
+                printf("    display channel ACK_SYNC message sent\n");
+                break;
             }
-        }
 
-        switch(msg_type){
-            //server set ack
-            case 3:{
-                printf("receive display server SET_ACK\n");
-                uint32_t ack_generation = *((uint32_t *)&rec_buf[6]);
-                set_ack_window = *((uint32_t *)&rec_buf[10]);
-                spice_msg_miniheader ack_sync_header;
-                ack_sync_header.type = 1;
-                ack_sync_header.size = 4;
-                memcpy(send_buf,&ack_sync_header,6);
-                *((uint32_t *)&send_buf[6]) = ack_generation;
-                sendn = send(cfd,send_buf,10,0);
-                if(sendn != 10){
-                    printf("error in send display client ack sync!\n");
-                    exit(0);
+            case 4:
+            {
+                uint32_t pingid;
+                uint64_t timestamp;
+                if(body_size == 12)
+                {
+                    count = recv(cfd,rec_buf,body_size,0);
+                    printf("tiny ping message received\n");
+                    pingid = *(uint32_t *)&rec_buf[0];
+                    timestamp = *(uint32_t *)&rec_buf[4];
+                    sendpong(cfd,pingid,timestamp);
                 }
-                break;
-            }
-            //server ping
-            case 4:{
-                printf("receive display server ping\n");
-                ping_ID = *((uint32_t *) &rec_buf[6]);
-                ping_timestamp = *((uint64_t *) &rec_buf[10]);
-                send_pong_msg(cfd,ping_ID,ping_timestamp);
-                break;
-            }
-            //server mark
-            case 102:{
-                printf("receive display server mark\n");
-                break;
-            }
-            //server inval_all_palette
-            case 108: {
-                printf("reveive display server INVAL_ALL_PALETTE\n");
-                break;
-            }
-            //server stream_create
-            case 122:{
-                printf("receive display server STREAM_CREATE\n");
-                break;
-            }
-            //server stream_data
-            case 123:{
-                printf("receive display server STREAM_DATA!\n");
-                stream_sequence++;
+                if(body_size == 256012)
+                {
+                    int i;
+                    recv(cfd,rec_buf,1500,0);
+                    pingid = *(uint32_t *)&rec_buf[0];
+                    timestamp = *(uint32_t *)&rec_buf[4];
+                    int circular = body_size/1500;
+                    int last_packet_size = body_size%1500;
+                    printf("circular = %d   last_packet_size = %d\n",circular,last_packet_size);
 
-                //send display client ack
-                if(stream_sequence%set_ack_window == 0){
-                    spice_msg_miniheader client_ack;
-                    client_ack.type = 2;
-                    client_ack.size = 0;
-                    memcpy(send_buf,&client_ack,6);
-                    sendn = send(cfd,send_buf,6,0);
-                    if(sendn != 6){
-                        printf("error in send display client ack!\n");
+                    for(i=0;i<circular-1;i++)
+                    {
+                        recv(cfd,rec_buf,150,0);
                     }
-                    printf("send display client ack\n");
+                    recv(cfd,rec_buf,last_packet_size,0);
+                    printf("big ping message received\n");
+                    sendpong(cfd,pingid,timestamp);
+//                    sleep(1);
                 }
-                recn = recv(cfd,media_buf,msg_size,0);
-                if(recn != msg_size){
-                    printf("error in receive stream data!\n");
-                    exit(0);
+                break;
+            }
+
+            //INVAL_ALL_PALETTES
+            case 108:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+                printf("    display channel INVAL_ALL_PALETTES message received\n");
+                break;
+            }
+            //DRAW_SURFACE_CREATE
+            case 314:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+                printf("    display channel DRAW_SURFACE_CREATE message received\n");
+                break;
+            }
+            //MONITORS_CONFIG
+            case 317:
+            {
+                count = recv(cfd,rec_buf,body_size,0);
+                printf("    display channel MONITORS_CONFIGE message received\n");
+                break;
+            }
+            //MARK
+            case 102:
+            {
+                count = recv(cfd, rec_buf, body_size, 0);
+                printf("    display channel MARK message received\n");
+                break;
+            }
+            //STREAM_CREATE
+            case 122:
+            {
+                count = recv(cfd, rec_buf, body_size, 0);
+                printf("    display channel STREAM_CREATE message received\n");
+                break;
+            }
+            //STREAM_DATA
+            case 123:
+            {
+                count = recv(cfd, media_buf, body_size, 0);
+
+                multimedia_time = (uint64_t)*(uint32_t *)&media_buf[4];
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+                gettimeofday(&ts1, NULL);
+//                current_time = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+                current_time = (uint64_t)(ts1.tv_sec*1000 +ts1.tv_usec/1000);
+
+//                printf("current time is : %ld    multimedia time is :%ld",current_time,multimedia_time);
+                cal_time(multimedia_time,current_time,body_size);
+
+//                printf("    display channel STREAM_DATA message received\n");
+                stream_sequence++;
+                if(stream_sequence%display_ack_window ==0)
+                {
+                    ClientAck clientAck;
+                    send(cfd,&clientAck,sizeof(clientAck),0);
                 }
 
-                int stream_ID = *((uint32_t *)&media_buf[0]);
-                int stream_data_size = *((uint32_t *)&media_buf[8]);
-//                int stream_multimedia_time = *（）
-                printf("stream ID %d the %dth stream data size is %d\n",stream_ID,stream_sequence,stream_data_size);
-
-
-                make_stream_file(stream_sequence,media_buf,stream_data_size);
                 break;
             }
-            //server draw_surface_create
-            case 314: {
-                printf("receive display server DRAW_SURFACE_CREATE\n");
+            case 125:
+            {
+                count = recv(cfd, rec_buf, body_size, 0);
+                printf("    display channel DESTROY message received!!!!!!\n");
                 break;
             }
-            //server monitors_config
-            case 317:{
-                printf("receive display server MONITORS_CONFIG\n");
-                break;
-            }
-            default: {
-                printf("receive display unhandled message type!\n");
+            default:
+            {
+                printf("    display channel unhandled message received,message type:%d  message size:%d \n", message_type,body_size);
+//                sleep(1);
+//                recv(cfd,rec_buf,1500,0);
                 break;
             }
         }
 
-//        memset(rec_buf,0,1500);
+
 
     }
+
+
+
+
+
 
 }
